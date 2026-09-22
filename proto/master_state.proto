@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package gfs.state;
+
+message CreateRecord {
+  string path = 1;
+}
+
+message RenameRecord {
+  string source = 1;
+  string target = 2;
+}
+
+message RemoveRecord {
+  string path = 1;
+}
+
+message AllocHandleRecord {
+  uint64 handle = 1;
+}
+
+message AddChunkRecord {
+  string path = 1;
+  uint64 index = 2;
+  uint64 handle = 3;
+}
+
+message ReplaceChunkRecord {
+  string path = 1;
+  uint64 index = 2;
+  uint64 handle = 3;
+}
+
+message BumpVersionRecord {
+  uint64 handle = 1;
+  uint64 version = 2;
+}
+
+message SnapshotRecord {
+  string source = 1;
+  string target = 2;
+}
+
+message DropChunkRecord {
+  uint64 handle = 1;
+}
+
+message LogRecord {
+  oneof body {
+    CreateRecord create = 1;
+    RenameRecord rename = 2;
+    RemoveRecord remove = 3;
+    AllocHandleRecord alloc_handle = 4;
+    AddChunkRecord add_chunk = 5;
+    ReplaceChunkRecord replace_chunk = 6;
+    BumpVersionRecord bump_version = 7;
+    SnapshotRecord snapshot = 8;
+    DropChunkRecord drop_chunk = 9;
+  }
+}
+
+message FileEntry {
+  string path = 1;
+  repeated uint64 chunk_handles = 2;
+}
+
+message ChunkEntry {
+  uint64 handle = 1;
+  uint64 version = 2;
+}
+
+message Checkpoint {
+  uint64 next_chunk_handle = 1;
+  repeated FileEntry files = 2;
+  repeated ChunkEntry chunks = 3;
+}

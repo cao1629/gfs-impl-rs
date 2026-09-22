@@ -1,0 +1,293 @@
+syntax = "proto3";
+
+package gfs.rpc;
+
+enum ResultCode {
+  OK = 0;
+  STALE_VERSION = 1;
+  NOT_PRIMARY = 2;
+  DATA_MISSING = 3;
+  RETRY_NEXT_CHUNK = 4;
+  CHECKSUM_MISMATCH = 5;
+  NO_SUCH_CHUNK = 6;
+  OUT_OF_RANGE = 7;
+  NO_REPLICAS = 8;
+  LEASE_EXPIRED = 9;
+  FAILED = 10;
+}
+
+message Replica {
+  string chunkserver_id = 1;
+  string address = 2;
+  string rack = 3;
+}
+
+message ChunkInfo {
+  uint64 index = 1;
+  uint64 handle = 2;
+  uint64 version = 3;
+  repeated Replica replicas = 4;
+}
+
+message GetClusterInfoRequest {}
+
+message GetClusterInfoResponse {
+  uint64 chunk_size = 1;
+  uint64 max_record_append_size = 2;
+}
+
+message CreateRequest {
+  string path = 1;
+}
+
+message CreateResponse {}
+
+message OpenRequest {
+  string path = 1;
+}
+
+message OpenResponse {
+  uint64 chunk_count = 1;
+}
+
+message DeleteRequest {
+  string path = 1;
+}
+
+message DeleteResponse {}
+
+message RenameRequest {
+  string source = 1;
+  string target = 2;
+}
+
+message RenameResponse {}
+
+message SnapshotRequest {
+  string source = 1;
+  string target = 2;
+}
+
+message SnapshotResponse {}
+
+message FindMatchingFilesRequest {
+  string directory = 1;
+  bool include_hidden = 2;
+}
+
+message DirEntry {
+  string name = 1;
+  bool is_directory = 2;
+}
+
+message FindMatchingFilesResponse {
+  repeated DirEntry entries = 1;
+}
+
+message FindLocationRequest {
+  string path = 1;
+  uint64 first_index = 2;
+  uint32 count = 3;
+}
+
+message FindLocationResponse {
+  repeated ChunkInfo chunks = 1;
+}
+
+message FindLeaseHolderRequest {
+  string path = 1;
+  uint64 index = 2;
+}
+
+message FindLeaseHolderResponse {
+  ResultCode code = 1;
+  uint64 handle = 2;
+  uint64 version = 3;
+  Replica primary = 4;
+  repeated Replica secondaries = 5;
+}
+
+message AddChunkRequest {
+  string path = 1;
+  uint64 index = 2;
+}
+
+message AddChunkResponse {
+  ResultCode code = 1;
+  ChunkInfo chunk = 2;
+}
+
+message ChunkReport {
+  uint64 handle = 1;
+  uint64 version = 2;
+  uint64 length = 3;
+}
+
+message HeartBeatRequest {
+  string chunkserver_id = 1;
+  string address = 2;
+  string rack = 3;
+  repeated ChunkReport chunks = 4;
+  repeated uint64 lease_extension_requests = 5;
+  repeated uint64 corrupt = 6;
+}
+
+message LeaseExtension {
+  uint64 handle = 1;
+  uint64 lease_ms = 2;
+}
+
+message HeartBeatResponse {
+  repeated uint64 delete_handles = 1;
+  repeated LeaseExtension extended = 2;
+}
+
+service Master {
+  rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
+  rpc Create(CreateRequest) returns (CreateResponse);
+  rpc Open(OpenRequest) returns (OpenResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Rename(RenameRequest) returns (RenameResponse);
+  rpc Snapshot(SnapshotRequest) returns (SnapshotResponse);
+  rpc FindMatchingFiles(FindMatchingFilesRequest) returns (FindMatchingFilesResponse);
+  rpc FindLocation(FindLocationRequest) returns (FindLocationResponse);
+  rpc FindLeaseHolder(FindLeaseHolderRequest) returns (FindLeaseHolderResponse);
+  rpc AddChunk(AddChunkRequest) returns (AddChunkResponse);
+  rpc HeartBeat(HeartBeatRequest) returns (HeartBeatResponse);
+}
+
+message PushHeader {
+  string client_id = 1;
+  uint64 sequence = 2;
+  uint64 total_length = 3;
+  repeated Replica forward_to = 4;
+}
+
+message PushDataRequest {
+  oneof payload {
+    PushHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message PushDataResponse {
+  ResultCode code = 1;
+  string failed_at = 2;
+}
+
+message ReadRequest {
+  uint64 handle = 1;
+  uint64 version = 2;
+  uint64 offset = 3;
+  uint64 length = 4;
+}
+
+message ReadResponse {
+  ResultCode code = 1;
+  bytes data = 2;
+}
+
+message WriteRequest {
+  uint64 handle = 1;
+  uint64 version = 2;
+  uint64 offset = 3;
+  string client_id = 4;
+  uint64 sequence = 5;
+}
+
+message WriteResponse {
+  ResultCode code = 1;
+  string failed_at = 2;
+}
+
+message RecordAppendRequest {
+  uint64 handle = 1;
+  uint64 version = 2;
+  string client_id = 3;
+  uint64 sequence = 4;
+}
+
+message RecordAppendResponse {
+  ResultCode code = 1;
+  uint64 offset = 2;
+  string failed_at = 3;
+}
+
+message GetChunkLengthRequest {
+  uint64 handle = 1;
+}
+
+message GetChunkLengthResponse {
+  ResultCode code = 1;
+  uint64 length = 2;
+}
+
+enum MutationKind {
+  WRITE = 0;
+  PAD = 1;
+}
+
+message ApplyMutationRequest {
+  uint64 handle = 1;
+  uint64 version = 2;
+  uint64 serial = 3;
+  MutationKind kind = 4;
+  uint64 offset = 5;
+  string client_id = 6;
+  uint64 sequence = 7;
+}
+
+message ApplyMutationResponse {
+  ResultCode code = 1;
+}
+
+message CreateChunkRequest {
+  uint64 handle = 1;
+  uint64 version = 2;
+  uint64 copy_from = 3;
+}
+
+message CreateChunkResponse {
+  ResultCode code = 1;
+}
+
+message GrantLeaseRequest {
+  uint64 handle = 1;
+  uint64 version = 2;
+  uint64 lease_ms = 3;
+  repeated Replica secondaries = 4;
+}
+
+message GrantLeaseResponse {
+  ResultCode code = 1;
+}
+
+message RevokeLeaseRequest {
+  uint64 handle = 1;
+}
+
+message RevokeLeaseResponse {
+  ResultCode code = 1;
+}
+
+message UpdateVersionRequest {
+  uint64 handle = 1;
+  uint64 version = 2;
+}
+
+message UpdateVersionResponse {
+  ResultCode code = 1;
+}
+
+service Chunkserver {
+  rpc PushData(stream PushDataRequest) returns (PushDataResponse);
+  rpc Read(ReadRequest) returns (ReadResponse);
+  rpc Write(WriteRequest) returns (WriteResponse);
+  rpc RecordAppend(RecordAppendRequest) returns (RecordAppendResponse);
+  rpc GetChunkLength(GetChunkLengthRequest) returns (GetChunkLengthResponse);
+  rpc ApplyMutation(ApplyMutationRequest) returns (ApplyMutationResponse);
+  rpc CreateChunk(CreateChunkRequest) returns (CreateChunkResponse);
+  rpc GrantLease(GrantLeaseRequest) returns (GrantLeaseResponse);
+  rpc RevokeLease(RevokeLeaseRequest) returns (RevokeLeaseResponse);
+  rpc UpdateVersion(UpdateVersionRequest) returns (UpdateVersionResponse);
+}

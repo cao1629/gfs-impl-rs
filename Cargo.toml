@@ -1,0 +1,39 @@
+[package]
+name = "gfs"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "gfs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gfs_master"
+path = "src/bin/gfs_master.rs"
+
+[[bin]]
+name = "gfs_chunkserver"
+path = "src/bin/gfs_chunkserver.rs"
+
+[[bin]]
+name = "gfs"
+path = "src/bin/gfs.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
+futures = "0.3"
+crc32fast = "1"
+parking_lot = "0.12"
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tempfile = "3"
