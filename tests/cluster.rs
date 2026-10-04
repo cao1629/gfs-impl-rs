@@ -15,7 +15,7 @@ use gfs::rpc::*;
 use tokio::time::{sleep, timeout};
 use tonic::transport::Channel;
 
-use support::{free_port, pattern, wait_until};
+use support::{free_port, pattern};
 
 struct Process {
     child: Option<Child>,
@@ -58,30 +58,46 @@ fn spawn(binary: &str, args: &[String], log_path: &Path) -> Child {
     Command::new(binary).args(args).stdout(Stdio::from(log)).stderr(Stdio::from(err)).spawn().expect("spawn a cluster process")
 }
 
-async fn wait_for_master(address: &str) {
-    let client = MasterClient::new(lazy_channel(address));
-    let ready = wait_until(
-        || async {
-            timeout(Duration::from_millis(300), client.clone().get_cluster_info(GetClusterInfoRequest {})).await.is_ok_and(|r| r.is_ok())
-        },
-        Duration::from_secs(15),
-    )
-    .await;
-    assert!(ready, "timed out waiting for master at {address}");
+const STARTUP_ATTEMPTS: usize = 5;
+
+async fn wait_ready<F, Fut>(child: &mut Child, mut probe: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return false;
+        }
+        if probe().await {
+            return true;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    false
 }
 
-async fn wait_for_chunkserver(address: &str) {
-    let client = ChunkserverClient::new(lazy_channel(address));
-    let ready = wait_until(
-        || async {
-            timeout(Duration::from_millis(300), client.clone().get_chunk_length(GetChunkLengthRequest { handle: 0 }))
-                .await
-                .is_ok_and(|r| r.is_ok())
-        },
-        Duration::from_secs(15),
-    )
-    .await;
-    assert!(ready, "timed out waiting for chunkserver at {address}");
+async fn master_ready(process: &mut Process) -> bool {
+    let client = MasterClient::new(lazy_channel(&process.address));
+    let child = process.child.as_mut().expect("a spawned master");
+    wait_ready(child, || {
+        let mut client = client.clone();
+        async move { timeout(Duration::from_millis(300), client.get_cluster_info(GetClusterInfoRequest {})).await.is_ok_and(|r| r.is_ok()) }
+    })
+    .await
+}
+
+async fn chunkserver_ready(process: &mut Process) -> bool {
+    let client = ChunkserverClient::new(lazy_channel(&process.address));
+    let child = process.child.as_mut().expect("a spawned chunkserver");
+    wait_ready(child, || {
+        let mut client = client.clone();
+        async move {
+            timeout(Duration::from_millis(300), client.get_chunk_length(GetChunkLengthRequest { handle: 0 })).await.is_ok_and(|r| r.is_ok())
+        }
+    })
+    .await
 }
 
 impl LocalCluster {
@@ -101,8 +117,7 @@ impl LocalCluster {
         };
         fs::create_dir_all(&master.data_dir).unwrap();
         let mut cluster = LocalCluster { root, flags, master, chunkservers: Vec::new() };
-        cluster.spawn_master();
-        wait_for_master(&cluster.master.address).await;
+        cluster.launch_master(true).await;
         for i in 0..chunkservers {
             let process = Process {
                 child: None,
@@ -113,10 +128,7 @@ impl LocalCluster {
             };
             fs::create_dir_all(&process.data_dir).unwrap();
             cluster.chunkservers.push(process);
-            cluster.spawn_chunkserver(i);
-        }
-        for i in 0..chunkservers {
-            wait_for_chunkserver(&cluster.chunkservers[i].address).await;
+            cluster.launch_chunkserver(i).await;
         }
         sleep(cluster.heartbeat_interval() * 3).await;
         cluster
@@ -148,6 +160,34 @@ impl LocalCluster {
         self.chunkservers[i].child = Some(child);
     }
 
+    async fn launch_master(&mut self, may_move: bool) {
+        for _ in 0..STARTUP_ATTEMPTS {
+            self.spawn_master();
+            if master_ready(&mut self.master).await {
+                return;
+            }
+            Self::kill(&mut self.master);
+            if may_move {
+                self.master.address = format!("127.0.0.1:{}", free_port());
+            } else {
+                sleep(Duration::from_millis(200)).await;
+            }
+        }
+        panic!("master never came up, see {}", self.master.log_path.display());
+    }
+
+    async fn launch_chunkserver(&mut self, i: usize) {
+        for _ in 0..STARTUP_ATTEMPTS {
+            self.spawn_chunkserver(i);
+            if chunkserver_ready(&mut self.chunkservers[i]).await {
+                return;
+            }
+            Self::kill(&mut self.chunkservers[i]);
+            self.chunkservers[i].address = format!("127.0.0.1:{}", free_port());
+        }
+        panic!("chunkserver {i} never came up, see {}", self.chunkservers[i].log_path.display());
+    }
+
     fn kill(process: &mut Process) {
         if let Some(mut child) = process.child.take() {
             let _ = child.kill();
@@ -161,8 +201,7 @@ impl LocalCluster {
 
     async fn restart_chunkserver(&mut self, i: usize) {
         Self::kill(&mut self.chunkservers[i]);
-        self.spawn_chunkserver(i);
-        wait_for_chunkserver(&self.chunkservers[i].address).await;
+        self.launch_chunkserver(i).await;
     }
 
     fn kill_master(&mut self) {
@@ -171,8 +210,7 @@ impl LocalCluster {
 
     async fn restart_master(&mut self) {
         Self::kill(&mut self.master);
-        self.spawn_master();
-        wait_for_master(&self.master.address).await;
+        self.launch_master(false).await;
         sleep(self.heartbeat_interval() * 3).await;
     }
 
@@ -227,7 +265,7 @@ impl Drop for LocalCluster {
             Self::kill(process);
         }
         Self::kill(&mut self.master);
-        if std::env::var_os("GFS_KEEP_TEST_DIRS").is_none() {
+        if std::env::var_os("GFS_KEEP_TEST_DIRS").is_none() && !std::thread::panicking() {
             let _ = fs::remove_dir_all(&self.root);
         } else {
             eprintln!("test cluster kept at {}", self.root.display());
