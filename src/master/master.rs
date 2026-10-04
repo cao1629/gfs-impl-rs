@@ -300,6 +300,7 @@ impl Master {
 
     async fn revoke_leases_on(&self, handles: &[u64]) -> Instant {
         let mut wait_until = now();
+        let mut unreachable = BTreeSet::new();
         for &handle in handles {
             let live = {
                 let state = self.state.lock();
@@ -308,7 +309,7 @@ impl Master {
             if !live {
                 continue;
             }
-            let result = self.leases.revoke(handle).await;
+            let result = self.leases.revoke(handle, &mut unreachable).await;
             if let (true, false, Some(expiry)) = (result.had_lease, result.acked, result.expiry) {
                 wait_until = wait_until.max(expiry + self.config.lease_clock_skew_margin + std::time::Duration::from_millis(1));
             }

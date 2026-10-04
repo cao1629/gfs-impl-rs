@@ -253,6 +253,7 @@ struct MasterInner {
     versions: Mutex<BTreeMap<u64, u64>>,
     next_handle: AtomicU64,
     lease_requests: AtomicI32,
+    snapshot_delay_ms: AtomicU64,
 }
 
 impl MasterInner {
@@ -354,6 +355,7 @@ impl Master for FakeMasterService {
 
     async fn snapshot(&self, request: Request<SnapshotRequest>) -> Result<Response<SnapshotResponse>, Status> {
         let req = request.into_inner();
+        tokio::time::sleep(Duration::from_millis(self.0.snapshot_delay_ms.load(Ordering::SeqCst))).await;
         self.0.move_locked(&req.source, &req.target, false)?;
         ok(SnapshotResponse {})
     }
@@ -472,6 +474,7 @@ impl FakeCluster {
             versions: Mutex::new(BTreeMap::new()),
             next_handle: AtomicU64::new(1),
             lease_requests: AtomicI32::new(0),
+            snapshot_delay_ms: AtomicU64::new(0),
         });
         let (incoming, addr) = bind("127.0.0.1:0").await.unwrap();
         let service = MasterServer::new(FakeMasterService(master.clone()));
@@ -661,6 +664,15 @@ async fn status_mapping() {
     client.create("/a").await.unwrap();
     assert_eq!(client.create("/a").await.unwrap_err().code, ErrorCode::AlreadyExists);
     assert_eq!(client.create("/a/b").await.unwrap_err().code, ErrorCode::InvalidArgument);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_waits_out_the_masters_lease_wait() {
+    let cluster = FakeCluster::start(3).await;
+    let client = Client::new(Config { client_rpc_deadline: Duration::from_millis(300), ..cluster.client_config() });
+    assert!(client.create("/a/b").await.is_ok());
+    cluster.master.snapshot_delay_ms.store(800, Ordering::SeqCst);
+    assert!(client.snapshot("/a", "/s").await.is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
