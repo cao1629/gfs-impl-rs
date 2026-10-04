@@ -198,7 +198,7 @@ impl LeaseManager {
                     warn!("chunk {handle} replica {id} did not ack version {}, dropping it", attempt.version);
                     state.chunks.remove_location(handle, id);
                 }
-                if failed.contains(&attempt.primary) {
+                if !failed.is_empty() {
                     continue;
                 }
                 let meta = state.chunks.find_mut(handle).expect("checked above");

@@ -280,6 +280,7 @@ impl Chunkserver {
             apply.set_kind(MutationKind::Pad);
             if let Some(at) = self.forward_mutation(apply, &lease.secondaries).await {
                 warn!("padding chunk {} did not reach {at}", handle_to_hex(handle));
+                return failed(ResultCode::Failed, at);
             }
             return failed(ResultCode::RetryNextChunk, String::new());
         }
@@ -393,7 +394,7 @@ impl Chunkserver {
         for listing in self.store.list() {
             req.chunks.push(ChunkReport { handle: listing.handle, version: listing.version, length: listing.length });
         }
-        req.lease_extension_requests = self.leases.held_handles();
+        req.lease_extension_requests = self.leases.handles_to_extend();
         let corrupt = self.store.corrupt_handles();
         req.corrupt = corrupt.clone();
 

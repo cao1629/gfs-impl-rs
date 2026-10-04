@@ -49,6 +49,7 @@ struct FakeState {
     grants: Vec<GrantLeaseRequest>,
     revokes: Vec<RevokeLeaseRequest>,
     updates: Vec<UpdateVersionRequest>,
+    fail_updates: bool,
 }
 
 struct FakeInner {
@@ -119,8 +120,11 @@ impl Chunkserver for FakeService {
     async fn update_version(&self, request: Request<UpdateVersionRequest>) -> Result<Response<UpdateVersionResponse>, Status> {
         let req = request.into_inner();
         let mut state = self.0.state.lock();
-        state.chunks.insert(req.handle, req.version);
         state.updates.push(req);
+        if state.fail_updates {
+            return ok(UpdateVersionResponse { code: ResultCode::Failed as i32 });
+        }
+        state.chunks.insert(req.handle, req.version);
         ok(UpdateVersionResponse { code: ResultCode::Ok as i32 })
     }
 }
@@ -213,6 +217,10 @@ impl FakeChunkserver {
 
     fn updates(&self) -> Vec<UpdateVersionRequest> {
         self.inner.state.lock().updates.clone()
+    }
+
+    fn fail_updates(&self, fail: bool) {
+        self.inner.state.lock().fail_updates = fail;
     }
 }
 
@@ -429,6 +437,32 @@ async fn namespace_operations() {
     assert_eq!(code(h.rename("/y", "/y/inside").await), Code::InvalidArgument);
     assert_eq!(code(h.rename("/y/c", "/y/c").await), Code::AlreadyExists);
     assert_eq!(h.list("/", false).await.unwrap(), vec!["y/"]);
+    t.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grant_resends_the_primary_a_list_without_a_failed_secondary() {
+    let mut t = TestContext::new().await;
+    t.start_fakes(3).await;
+    assert!(t.harness.create("/f").await.is_ok());
+    assert_eq!(t.harness.add_chunk("/f", 0).await.unwrap().code(), ResultCode::Ok);
+    t.fakes[2].stop_heartbeats();
+    t.fakes[2].fail_updates(true);
+    let failing_id = t.fakes[2].id().to_string();
+
+    let lease = t.harness.find_lease_holder("/f", 0).await.unwrap();
+    assert_eq!(lease.code(), ResultCode::Ok);
+    assert_eq!(lease.version, 2);
+    assert_eq!(lease.secondaries.len(), 1);
+    assert_ne!(lease.secondaries[0].chunkserver_id, failing_id);
+    let primary_id = lease.primary.as_ref().unwrap().chunkserver_id.clone();
+    assert_ne!(primary_id, failing_id);
+    let grants = t.fake_by_id(&primary_id).grants();
+    assert_eq!(grants.len(), 2);
+    assert_eq!(grants[0].secondaries.len(), 2);
+    assert_eq!(grants[1].version, 2);
+    assert_eq!(grants[1].secondaries.len(), 1);
+    assert_eq!(grants[1].secondaries[0].chunkserver_id, lease.secondaries[0].chunkserver_id);
     t.finish().await;
 }
 

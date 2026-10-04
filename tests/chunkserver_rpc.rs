@@ -219,6 +219,37 @@ async fn record_append_assigns_offsets_and_pads_at_the_boundary() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn padding_that_misses_a_secondary_fails_and_the_retry_pads_it() {
+    let f = Fixture::new().await;
+    let first = pattern(100 * 1024, b'e');
+    assert_eq!(f.push(&first, 70).await.code(), ResultCode::Ok);
+    assert_eq!(f.append(1, 2, 70).await.code(), ResultCode::Ok);
+
+    let set_version = |version: u64| {
+        let mut client = f.servers[2].client.clone();
+        async move {
+            let resp = client.update_version(UpdateVersionRequest { handle: 1, version }).await.unwrap().into_inner();
+            assert_eq!(resp.code(), ResultCode::Ok);
+        }
+    };
+    set_version(3).await;
+    assert_eq!(f.push_chain(&pattern(CHUNK as usize, b'f'), 71, &[0]).await.code(), ResultCode::Ok);
+    let padded = f.append(1, 2, 71).await;
+    assert_eq!(padded.code(), ResultCode::Failed);
+    assert_eq!(padded.failed_at, f.servers[2].id);
+    assert_eq!(f.length(1, 1).await, CHUNK);
+    assert_eq!(f.length(2, 1).await, first.len() as u64);
+
+    set_version(2).await;
+    assert_eq!(f.push_chain(b"tiny", 72, &[0]).await.code(), ResultCode::Ok);
+    assert_eq!(f.append(1, 2, 72).await.code(), ResultCode::RetryNextChunk);
+    assert_eq!(f.length(2, 1).await, CHUNK);
+    let tail = f.read(2, 1, 2, CHUNK - 8, 8).await;
+    assert_eq!(tail.code(), ResultCode::Ok);
+    assert_eq!(tail.data, vec![0u8; 8]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejects_missing_data_wrong_version_and_non_primary() {
     let f = Fixture::new().await;
     assert_eq!(f.write(0, 1, 2, 0, 999).await.code(), ResultCode::DataMissing);
