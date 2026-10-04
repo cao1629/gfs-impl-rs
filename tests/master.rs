@@ -50,6 +50,7 @@ struct FakeState {
     revokes: Vec<RevokeLeaseRequest>,
     updates: Vec<UpdateVersionRequest>,
     fail_updates: bool,
+    revoke_delay: Duration,
 }
 
 struct FakeInner {
@@ -111,9 +112,13 @@ impl Chunkserver for FakeService {
 
     async fn revoke_lease(&self, request: Request<RevokeLeaseRequest>) -> Result<Response<RevokeLeaseResponse>, Status> {
         let req = request.into_inner();
-        let mut state = self.0.state.lock();
-        state.held_leases.remove(&req.handle);
-        state.revokes.push(req);
+        let delay = {
+            let mut state = self.0.state.lock();
+            state.held_leases.remove(&req.handle);
+            state.revokes.push(req);
+            state.revoke_delay
+        };
+        sleep(delay).await;
         ok(RevokeLeaseResponse { code: ResultCode::Ok as i32 })
     }
 
@@ -221,6 +226,10 @@ impl FakeChunkserver {
 
     fn fail_updates(&self, fail: bool) {
         self.inner.state.lock().fail_updates = fail;
+    }
+
+    fn delay_revokes(&self, delay: Duration) {
+        self.inner.state.lock().revoke_delay = delay;
     }
 }
 
@@ -579,6 +588,29 @@ async fn dead_chunkserver_shrinks_replica_set_and_primary_death_waits_for_expiry
     assert_eq!(replacement.version, 4);
     assert!(elapsed > Duration::from_millis(500), "elapsed {elapsed:?}");
     assert!(elapsed < Duration::from_millis(3000), "elapsed {elapsed:?}");
+    t.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_stops_revoking_at_a_primary_that_did_not_answer() {
+    let mut t = TestContext::new().await;
+    t.start_fakes(3).await;
+    let h = &t.harness;
+    let mut primaries = BTreeSet::new();
+    for name in ["a", "b", "c"] {
+        let path = format!("/dir/{name}");
+        assert!(h.create(&path).await.is_ok());
+        h.added_handle(&path, 0).await;
+        let lease = h.find_lease_holder(&path, 0).await.unwrap();
+        assert_eq!(lease.code(), ResultCode::Ok);
+        primaries.insert(lease.primary.unwrap().chunkserver_id);
+    }
+    assert_eq!(primaries.len(), 1);
+    let primary = t.fake_by_id(primaries.first().unwrap());
+    primary.delay_revokes(Duration::from_millis(1500));
+
+    assert!(h.snapshot("/dir", "/copy").await.is_ok());
+    assert_eq!(primary.revokes().len(), 1);
     t.finish().await;
 }
 
