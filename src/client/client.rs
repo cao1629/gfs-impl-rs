@@ -186,7 +186,7 @@ impl Client {
     pub async fn snapshot(&self, source: &str, target: &str) -> Result<(), Error> {
         let mut master = self.master.clone();
         let request = SnapshotRequest { source: source.to_string(), target: target.to_string() };
-        let result = self.call(self.config.client_rpc_deadline, master.snapshot(request)).await;
+        let result = self.call(self.lease_wait_deadline(), master.snapshot(request)).await;
         self.forget_file(source);
         result.map(|_| ())
     }
@@ -425,14 +425,17 @@ impl Client {
         Ok(())
     }
 
+    fn lease_wait_deadline(&self) -> Duration {
+        self.config.lease_duration + 2 * self.config.lease_clock_skew_margin + self.config.client_rpc_deadline
+    }
+
     async fn find_lease(&self, path: &str, index: u64) -> Result<(CachedLease, bool), Error> {
         if let Some(cached) = self.leases.get(path, index) {
             return Ok((cached, true));
         }
         let mut master = self.master.clone();
         let request = FindLeaseHolderRequest { path: path.to_string(), index };
-        let deadline = self.config.lease_duration + 2 * self.config.lease_clock_skew_margin + self.config.client_rpc_deadline;
-        let resp = self.call(deadline, master.find_lease_holder(request)).await?;
+        let resp = self.call(self.lease_wait_deadline(), master.find_lease_holder(request)).await?;
         if resp.code() != ResultCode::Ok {
             return Err(Error::from_result_code(resp.code(), &format!("find lease holder for chunk {index} of {path}")));
         }

@@ -24,11 +24,12 @@ struct Slot {
     expiry: Instant,
     secondaries: Vec<Replica>,
     next_serial: u64,
+    mutated_since_renewal: bool,
 }
 
 impl Slot {
     fn empty() -> Slot {
-        Slot { held: false, expiry: now(), secondaries: Vec::new(), next_serial: 1 }
+        Slot { held: false, expiry: now(), secondaries: Vec::new(), next_serial: 1, mutated_since_renewal: false }
     }
 }
 
@@ -52,6 +53,7 @@ impl LeaseTable {
         slot.held = true;
         slot.expiry = self.local_expiry(lease);
         slot.secondaries = secondaries;
+        slot.mutated_since_renewal = false;
     }
 
     pub fn extend(&self, handle: u64, lease: Duration) -> bool {
@@ -59,6 +61,7 @@ impl LeaseTable {
         match slots.get_mut(&handle) {
             Some(slot) if slot.held => {
                 slot.expiry = self.local_expiry(lease);
+                slot.mutated_since_renewal = false;
                 true
             }
             _ => false,
@@ -91,13 +94,56 @@ impl LeaseTable {
         let slot = slots.entry(handle).or_insert_with(Slot::empty);
         let serial = slot.next_serial;
         slot.next_serial += 1;
+        slot.mutated_since_renewal = true;
         serial
     }
 
-    pub fn held_handles(&self) -> Vec<u64> {
+    pub fn handles_to_extend(&self) -> Vec<u64> {
         let t = now();
-        let mut out: Vec<u64> = self.slots.lock().iter().filter(|(_, slot)| slot.held && t <= slot.expiry).map(|(h, _)| *h).collect();
+        let mut out: Vec<u64> = self
+            .slots
+            .lock()
+            .iter()
+            .filter(|(_, slot)| slot.held && t <= slot.expiry && slot.mutated_since_renewal)
+            .map(|(h, _)| *h)
+            .collect();
         out.sort_unstable();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asks_for_extension_only_after_a_mutation() {
+        let leases = LeaseTable::new(Duration::ZERO);
+        leases.grant(7, Duration::from_secs(60), Vec::new());
+        assert!(leases.handles_to_extend().is_empty());
+
+        leases.next_serial(7);
+        assert_eq!(leases.handles_to_extend(), vec![7]);
+        assert_eq!(leases.handles_to_extend(), vec![7]);
+
+        assert!(leases.extend(7, Duration::from_secs(60)));
+        assert!(leases.handles_to_extend().is_empty());
+
+        leases.next_serial(7);
+        assert_eq!(leases.handles_to_extend(), vec![7]);
+        leases.grant(7, Duration::from_secs(60), Vec::new());
+        assert!(leases.handles_to_extend().is_empty());
+    }
+
+    #[test]
+    fn never_asks_for_an_expired_or_revoked_lease() {
+        let leases = LeaseTable::new(Duration::ZERO);
+        leases.grant(1, Duration::ZERO, Vec::new());
+        leases.next_serial(1);
+        leases.grant(2, Duration::from_secs(60), Vec::new());
+        leases.next_serial(2);
+        leases.revoke(2);
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(leases.handles_to_extend().is_empty());
     }
 }

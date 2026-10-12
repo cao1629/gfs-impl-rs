@@ -198,7 +198,7 @@ impl LeaseManager {
                     warn!("chunk {handle} replica {id} did not ack version {}, dropping it", attempt.version);
                     state.chunks.remove_location(handle, id);
                 }
-                if failed.contains(&attempt.primary) {
+                if !failed.is_empty() {
                     continue;
                 }
                 let meta = state.chunks.find_mut(handle).expect("checked above");
@@ -259,7 +259,7 @@ impl LeaseManager {
         self.end_handle(handle);
     }
 
-    pub async fn revoke(&self, handle: u64) -> RevokeResult {
+    pub async fn revoke(&self, handle: u64, unreachable: &mut BTreeSet<String>) -> RevokeResult {
         let mut result = RevokeResult::default();
         let primary = {
             let mut state = self.state.lock();
@@ -274,7 +274,10 @@ impl LeaseManager {
             lease.revoked = true;
             lease.primary.clone()
         };
-        let acked = self.revoke_lease_acked(&primary, RevokeLeaseRequest { handle }).await;
+        let acked = !unreachable.contains(&primary) && self.revoke_lease_acked(&primary, RevokeLeaseRequest { handle }).await;
+        if !acked {
+            unreachable.insert(primary.clone());
+        }
         let mut state = self.state.lock();
         if let Some(meta) = state.chunks.find_mut(handle)
             && acked
